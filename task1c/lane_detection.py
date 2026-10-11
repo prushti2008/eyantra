@@ -11,14 +11,12 @@
 *       _learned_width, _temporal_update, _unknown,
 *       _masks, _fit_white_divider, _fit_white_hough, _fit_guided_yellow,
 *       _fit_yellow_boundaries, _virtual_divider, _model_from_points,
-*       _polyfit_stable, _eval_model, _slope, _yellow_edges,
-*       _divider_plausible, _divider_from_edge, _finish_divider
+*       _polyfit_stable, _eval_model
 *
 *   Global variables added:
 *       LANE_ROWS_FRAC, CENTER_ROWS_FRAC, CENTER_ROW_WEIGHTS,
 *       LANE_DECISION_MARGIN, MAX_HOLD_FRAMES, MAX_WHITE_CACHE_AGE,
-*       SCENE_CUT_DIFF, WIDTH_HISTORY, CENTER_SMOOTHING, SLOPE_ROWS_FRAC,
-*       MIN_DIVIDER_SLOPE, EDGE_SLOPE_MARGIN, _STATE
+*       SCENE_CUT_DIFF, WIDTH_HISTORY, CENTER_SMOOTHING, FULL_EVERY, _STATE
 *
 *****************************************************************************************
 '''
@@ -67,7 +65,7 @@ MAX_WHITE_CACHE_AGE = 4
 
 # Mean absolute difference (0..255) between ~32x24 grey thumbnails of
 # consecutive frames above which a new clip is assumed and the memory cleared.
-SCENE_CUT_DIFF = 35.0
+SCENE_CUT_DIFF = 15.0
 
 # Number of recent lane-width measurements kept per centre row.
 WIDTH_HISTORY = 15
@@ -75,19 +73,10 @@ WIDTH_HISTORY = 15
 # Weight of the new measurement when smoothing center_x over frames.
 CENTER_SMOOTHING = 0.7
 
-# Rows over which the slant (dx/dy) of a line is measured. A line on the
-# vehicle's right always slants down-right (dx/dy > 0) and one on its left
-# down-left, whatever angle the vehicle makes with the road; the position of
-# the line relative to the image centre does not have that property.
-SLOPE_ROWS_FRAC = (0.72, 0.78, 0.84, 0.90)
-
-# Below this |dx/dy| the divider is nearly under the vehicle and its slant is
-# too small to call; the image-centre test decides instead.
-MIN_DIVIDER_SLOPE = 0.12
-
-# The divider lies between the two yellow edge lines, so its slant must be at
-# least this much larger than the left edge's and smaller than the right's.
-EDGE_SLOPE_MARGIN = 0.25
+# The full analysis runs on every FULL_EVERY-th frame; in between, the answer
+# of the previous frame is reused (the lane moves ~1 px per frame, the
+# full-credit band is 30 px). A failed or first frame is always re-analysed.
+FULL_EVERY = 2
 
 _STATE = {}
 
@@ -101,6 +90,18 @@ def detect_lane(frame):
         return _unknown()
 
     state = _get_state(frame)
+
+    last = state["last"]
+    if (
+        last is not None
+        and state["last_age"] == 0
+        and state["since_full"] + 1 < FULL_EVERY
+    ):
+        # Reuse the previous frame's answer.
+        state["since_full"] += 1
+        return {"center_x": int(last["center_x"]), "lane": last["lane"]}
+
+    state["since_full"] = 0
     observation = _analyse_frame(frame, state)
     return _temporal_update(state, observation, w)
 
@@ -142,6 +143,7 @@ def _get_state(frame):
             "last_age": 0,         # frames since it was measured
             "white": None,         # last divider model
             "white_age": 0,
+            "since_full": 0,       # frames since the last full analysis
         })
 
     _STATE["thumb"] = thumb
@@ -194,21 +196,11 @@ def _analyse_frame(frame, state):
     h, w = frame.shape[:2]
     yellow, white = _masks(frame)
 
-    centre_y = np.asarray(CENTER_ROWS_FRAC, dtype=np.float64) * h
-    learned = _learned_width(state, len(centre_y))
-
-    yellow_models = _fit_yellow_boundaries(yellow, h, w)
-    edges = _yellow_edges(yellow_models, h)
-
     # --- the dashed divider ---------------------------------------------
-    # White objects beyond a yellow edge (kerbs, posts, buildings) are not
-    # the divider, however well they line up.
-    white_model = _fit_white_divider(
-        white, h, w, lambda m: _divider_plausible(m, edges, h))
+    white_model = _fit_white_divider(white, h, w)
 
     if white_model is None and state["white"] is not None \
-            and state["white_age"] < MAX_WHITE_CACHE_AGE \
-            and _divider_plausible(state["white"], edges, h):
+            and state["white_age"] < MAX_WHITE_CACHE_AGE:
         # The dashed line is in a gap; the vehicle has hardly moved since
         # the last frame in which it was seen.
         white_model = state["white"]
@@ -217,12 +209,12 @@ def _analyse_frame(frame, state):
         state["white"] = white_model
         state["white_age"] = 0
 
+    yellow_models = _fit_yellow_boundaries(yellow, h, w)
+
     if white_model is None:
-        # No dash visible. The divider sits midway between the two yellow
-        # edge lines, and one lane width inside either of them.
-        white_model = _virtual_divider(edges, h, w)
-        if white_model is None:
-            white_model = _divider_from_edge(edges, learned, centre_y)
+        # No dash anywhere: the divider sits midway between the two solid
+        # yellow edge lines when both are visible.
+        white_model = _virtual_divider(yellow_models, h, w)
 
     if white_model is None:
         return None
@@ -233,6 +225,7 @@ def _analyse_frame(frame, state):
         return None
 
     # --- where its centre is --------------------------------------------
+    centre_y = np.asarray(CENTER_ROWS_FRAC, dtype=np.float64) * h
     white_x = _eval_model(white_model, centre_y)
     if white_x is None:
         return None
@@ -242,8 +235,10 @@ def _analyse_frame(frame, state):
     other_lane = LANE_RIGHT if lane == LANE_LEFT else LANE_LEFT
 
     own_model = _fit_guided_yellow(yellow, white_model, lane, h, w)
-    if own_model is None and edges[own_name] is not None:
-        own_model = edges[own_name][0]
+    if own_model is None:
+        own_model = yellow_models.get(own_name)
+
+    learned = _learned_width(state, len(centre_y))
 
     centre = None
     if own_model is not None:
@@ -270,10 +265,10 @@ def _analyse_frame(frame, state):
     if centre is None:
         # Own yellow edge not usable: both lanes have the same width, so the
         # yellow line on the far side of the divider gives the width too.
-        other_name = "right" if own_name == "left" else "left"
         other_model = _fit_guided_yellow(yellow, white_model, other_lane, h, w)
-        if other_model is None and edges[other_name] is not None:
-            other_model = edges[other_name][0]
+        if other_model is None:
+            other_model = yellow_models.get(
+                "right" if own_name == "left" else "left")
         if other_model is not None:
             other_x = _eval_model(other_model, centre_y)
             pair = _centre_from_pair(white_x, other_x, other_lane, w,
@@ -288,24 +283,12 @@ def _analyse_frame(frame, state):
         centre = _centre_from_width(white_x, learned, lane, w)
 
     if centre is None or not np.isfinite(centre):
-        # The lane is known even if its centre is not: keep the last centre
-        # of this lane rather than giving up on the frame.
-        last = state["last"]
-        if last is None or last["lane"] != lane:
-            return None
-        centre = float(last["center_x"])
+        return None
 
     return {"center_x": centre, "lane": lane}
 
 
 def _decide_lane(white_model, state, h, w):
-    slope = _slope(white_model, h)
-    if slope is not None and abs(slope) >= MIN_DIVIDER_SLOPE:
-        # Divider slanting down-right is on the vehicle's right.
-        return LANE_LEFT if slope > 0 else LANE_RIGHT
-
-    # Divider nearly under the vehicle: fall back to which side of the image
-    # centre it passes.
     lane_y = np.asarray(LANE_ROWS_FRAC, dtype=np.float64) * h
     white_lane = _eval_model(white_model, lane_y)
     if white_lane is None:
@@ -392,29 +375,10 @@ def _centre_from_width(white_x, widths, lane, w):
 
 
 def _weighted_centre(centres, good):
-    '''Lane centre at the reference row (the weighted mean of the rows).
-
-    A weighted least-squares line through the usable rows, read off at the
-    reference row. With every row usable this equals the weighted mean of the
-    centres; when some rows are missing it does not drift to another row.
-    '''
-    all_w = np.asarray(CENTER_ROW_WEIGHTS, dtype=np.float64)
-    rows = np.asarray(CENTER_ROWS_FRAC, dtype=np.float64)
-    weights = all_w[good]
+    weights = np.asarray(CENTER_ROW_WEIGHTS, dtype=np.float64)[good]
     if weights.size == 0 or np.sum(weights) <= 0:
         return None
-
-    y_ref = float(np.sum(rows * all_w) / np.sum(all_w))
-    ys = rows[good]
-    xs = centres[good]
-
-    centre = float(np.sum(xs * weights) / np.sum(weights))
-    if xs.size >= 3 and np.ptp(ys) >= 0.10:
-        try:
-            coef = np.polyfit(ys, xs, 1, w=np.sqrt(weights))
-            centre = float(np.polyval(coef, y_ref))
-        except (TypeError, ValueError, np.linalg.LinAlgError):
-            pass
+    centre = float(np.sum(centres[good] * weights) / np.sum(weights))
     return centre if np.isfinite(centre) else None
 
 
@@ -634,11 +598,11 @@ def _fit_yellow_boundaries(mask, h, w):
     return models
 
 
-def _virtual_divider(edges, h, w):
+def _virtual_divider(yellow_models, h, w):
     '''Midline of the two yellow edge lines, if both are plausible.'''
-    if edges["left"] is None or edges["right"] is None:
+    left, right = yellow_models.get("left"), yellow_models.get("right")
+    if left is None or right is None:
         return None
-    left, right = edges["left"][0], edges["right"][0]
 
     ys = np.linspace(0.55*h, 0.92*h, 12)
     lx, rx = _eval_model(left, ys), _eval_model(right, ys)
@@ -660,69 +624,7 @@ def _model_from_points(ys, xs):
     return _polyfit_stable(ys, xs, 1)
 
 
-def _slope(model, h):
-    '''Mean dx/dy of a fitted line over the lower image rows.'''
-    ys = np.asarray(SLOPE_ROWS_FRAC, dtype=np.float64) * h
-    a = _eval_model(model, ys - 1.0)
-    b = _eval_model(model, ys + 1.0)
-    if a is None or b is None:
-        return None
-    slope = float(np.mean((np.asarray(b) - np.asarray(a)) / 2.0))
-    return slope if np.isfinite(slope) else None
-
-
-def _yellow_edges(yellow_models, h):
-    '''Classify the yellow lines into the road's left and right edges.
-
-    An edge on the vehicle's left slants down-left (dx/dy < 0), one on its
-    right down-right. Returns {"left": (model, slope) or None, "right": ...},
-    keeping the innermost line on each side.
-    '''
-    edges = {"left": None, "right": None}
-    for model in yellow_models.values():
-        if model is None:
-            continue
-        s = _slope(model, h)
-        if s is None:
-            continue
-        side = "left" if s < 0 else "right"
-        current = edges[side]
-        if current is None or abs(s) < abs(current[1]):
-            edges[side] = (model, s)
-    return edges
-
-
-def _divider_plausible(model, edges, h):
-    '''False if the line lies outside either yellow edge.'''
-    s = _slope(model, h)
-    if s is None:
-        return False
-    if edges["left"] is not None and s <= edges["left"][1] + EDGE_SLOPE_MARGIN:
-        return False
-    if edges["right"] is not None and s >= edges["right"][1] - EDGE_SLOPE_MARGIN:
-        return False
-    return True
-
-
-def _divider_from_edge(edges, learned, centre_y):
-    '''Divider one recent lane width inside the single visible edge.'''
-    if (edges["left"] is None) == (edges["right"] is None):
-        return None
-    if edges["left"] is not None:
-        model, sign = edges["left"][0], 1.0
-    else:
-        model, sign = edges["right"][0], -1.0
-    edge_x = _eval_model(model, centre_y)
-    if edge_x is None:
-        return None
-    xs = np.asarray(edge_x, dtype=np.float64) + sign * learned
-    good = np.isfinite(xs)
-    if np.count_nonzero(good) < 3:
-        return None
-    return _polyfit_stable(centre_y[good], xs[good], 1)
-
-
-def _fit_white_divider(mask, h, w, plausible=None):
+def _fit_white_divider(mask, h, w):
     # The mask is empty above 0.45*h, so label only the part below it.
     top = int(0.45*h)
     n, labels, stats, centroids = cv2.connectedComponentsWithStats(
@@ -752,6 +654,9 @@ def _fit_white_divider(mask, h, w, plausible=None):
         data = np.asarray([(c[1], c[0]) for c in components],
                           dtype=np.float64)
 
+        best_model = None
+        best_inliers = None
+
         # Every pair of blobs at once: the line through the pair, its inliers
         # and its score (count, vertical span, fit error).
         ii, jj = np.triu_indices(len(data), k=1)
@@ -777,46 +682,36 @@ def _fit_white_divider(mask, h, w, plausible=None):
             score = np.where(span < 70, score - 15.0, score)
             score = np.where(count >= 2, score, -np.inf)
 
-            # Best-scoring candidates first; the first plausible one wins.
-            for k in np.argsort(-score, kind="stable")[:30]:
-                if not np.isfinite(score[k]):
-                    break
-                model = _polyfit_stable([y1[k], y2[k]], [x1[k], x2[k]], 1)
-                if model is None:
-                    continue
-                model = _finish_divider(model, data[inl[k]])
-                if model is not None and (plausible is None or plausible(model)):
-                    return model
+            k = int(np.argmax(score))
+            if np.isfinite(score[k]):
+                best_model = _polyfit_stable(
+                    [y1[k], y2[k]], [x1[k], x2[k]], 1)
+                best_inliers = inl[k]
 
-    model = _fit_white_hough(mask, h, w)
-    if model is not None and (plausible is None or plausible(model)):
-        return model
-    return None
+        if best_model is not None and best_inliers is not None:
+            good = data[best_inliers]
 
+            # Least-squares line through every inlier, not just the pair
+            # that happened to win.
+            if len(good) >= 3:
+                refit = _polyfit_stable(good[:, 0], good[:, 1], 1)
+                if refit is not None:
+                    best_model = refit
 
-def _finish_divider(model, good):
-    '''Refine a candidate divider on its inliers; None if too short.'''
-    if np.ptp(good[:, 0]) < 60:
-        return None
+            if len(good) >= 4 and np.ptp(good[:, 0]) >= 110:
+                curved = _polyfit_stable(good[:, 0], good[:, 1], 2)
+                if curved is not None:
+                    line_err = float(np.mean(np.abs(
+                        _eval_model(best_model, good[:, 0]) - good[:, 1])))
+                    curve_err = float(np.mean(np.abs(
+                        _eval_model(curved, good[:, 0]) - good[:, 1])))
+                    if curve_err + 1.5 < line_err:
+                        best_model = curved
 
-    # Least-squares line through every inlier, not just the pair that
-    # happened to win.
-    if len(good) >= 3:
-        refit = _polyfit_stable(good[:, 0], good[:, 1], 1)
-        if refit is not None:
-            model = refit
+            if np.ptp(good[:, 0]) >= 60:
+                return best_model
 
-    if len(good) >= 4 and np.ptp(good[:, 0]) >= 110:
-        curved = _polyfit_stable(good[:, 0], good[:, 1], 2)
-        if curved is not None:
-            line_err = float(np.mean(np.abs(
-                _eval_model(model, good[:, 0]) - good[:, 1])))
-            curve_err = float(np.mean(np.abs(
-                _eval_model(curved, good[:, 0]) - good[:, 1])))
-            if curve_err + 1.5 < line_err:
-                model = curved
-
-    return model
+    return _fit_white_hough(mask, h, w)
 
 
 def _fit_white_hough(mask, h, w):
@@ -882,6 +777,14 @@ def _polyfit_stable(x, y, degree):
         return None
 
     u = (x - x0) / scale
+    if degree == 1:
+        # u has zero mean, so the least-squares line is closed-form.
+        denom = float(np.dot(u, u))
+        if denom < 1e-12:
+            return None
+        slope = float(np.dot(u, y)) / denom
+        return (np.array([slope, float(np.mean(y))]), x0, scale)
+
     try:
         coef = np.polyfit(u, y, degree)
     except (TypeError, ValueError, np.linalg.LinAlgError):

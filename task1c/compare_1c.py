@@ -29,9 +29,13 @@ def main():
         return
     chance = max(ev.LANE_CHANCE_MIN, ev.majority_share(truth))
 
-    print("\n{:<28}{:>8}{:>9}{:>8}{:>10}{:>9}{:>12}".format(
-        "file", "lane", "centre", "TOTAL", "mean err", "unknown",
-        "detect time"))
+    print("\nPUBLIC = marks on the public clips (lane chance-corrected).")
+    print("PRIVATE-EST = 20*lane accuracy + 30*centre score: what the same "
+          "answers earn on a single-lane set, where the lane marks are not "
+          "chance-corrected.\n")
+    print("{:<26}{:>7}{:>8}{:>8}{:>9}{:>9}{:>9}{:>12}".format(
+        "file", "lane", "centre", "PUBLIC", "PRIV-EST", "mean err",
+        "unknown", "detect time"))
     for name in files:
         _, detect_lane = ev.load_detect_lane(Path(name).resolve())
         t0 = time.perf_counter()
@@ -39,9 +43,11 @@ def main():
                     for c in clips}
         wall = time.perf_counter() - t0
         s = ev.aggregate(per_clip, chance)
-        print("{:<28}{:>8.2f}{:>9.2f}{:>8.2f}{:>8.1f}px{:>9}{:>10.1f} s".format(
-            Path(name).name[:27], s["marks_lane"], s["marks_center"],
-            s["marks_total"], s["mean_center_error_px"] or -1,
+        private_est = (ev.MARKS_LANE * s["lane_accuracy"]
+                       + ev.MARKS_CENTER * s["center_accuracy"])
+        print("{:<26}{:>7.2f}{:>8.2f}{:>8.2f}{:>9.2f}{:>7.1f}px{:>9}{:>10.1f} s".format(
+            Path(name).name[:25], s["marks_lane"], s["marks_center"],
+            s["marks_total"], private_est, s["mean_center_error_px"] or -1,
             s["unknown_returned"], s["detect_seconds"]))
         bad = ["{} {}/{}".format(c, t["lane_correct"], t["scored"])
                for c, t in sorted(per_clip.items())
