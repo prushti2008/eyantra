@@ -92,6 +92,13 @@ AXIS_FRAC = 0.50            # image column (fraction of width) of the
 # Controller (the cross-track error is measured in LANE WIDTHS, so the real
 # lane width in metres is not needed)
 K_CT = 2.4                  # cross-track gain, per lane width
+C_PSI = 1.0                 # look-ahead correction: lane widths of cross-track
+                            # error per radian of heading estimate that belong
+                            # to the bend, not to the vehicle's position
+K_H = 1.0                   # weight of the heading error. On a bend the
+                            # heading estimate also contains the curve of
+                            # the road, so a value below 1 stops the vehicle
+                            # steering too hard into it
 CRUISE_SPEED = 2.0          # wheel speed on straights, rad/s
 MIN_SPEED = 1.0             # wheel speed in the tightest bend, rad/s
 STEER_SLOW = math.radians(20.0)  # steering at which speed reaches MIN_SPEED
@@ -1024,7 +1031,8 @@ def compute_control(detection, stop_requested, now=None, dt=None):
     else:
         # Stanley-style law, written for a right-positive error; the
         # steering joints are positive to the LEFT, hence the minus sign.
-        delta_right = detection["psi"] + math.atan(K_CT * detection["e"])
+        e_corrected = detection["e"] - C_PSI * detection["psi"]
+        delta_right = K_H * detection["psi"] + math.atan(K_CT * e_corrected)
         steer_target = -delta_right
         steer_target = max(-MAX_STEER, min(MAX_STEER, steer_target))
         frac = min(1.0, abs(steer_target) / STEER_SLOW)
