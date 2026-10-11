@@ -63,7 +63,7 @@ MAX_HOLD_FRAMES = 6
 # a gap.
 MAX_WHITE_CACHE_AGE = 4
 
-# Mean absolute difference (0..255) between 32x24 grey thumbnails of
+# Mean absolute difference (0..255) between ~32x24 grey thumbnails of
 # consecutive frames above which a new clip is assumed and the memory cleared.
 SCENE_CUT_DIFF = 35.0
 
@@ -104,9 +104,8 @@ def _get_state(frame):
     reset, so a new clip is detected from the picture itself.
     '''
     h, w = frame.shape[:2]
-    grey = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    thumb = cv2.resize(grey, (32, 24), interpolation=cv2.INTER_AREA)
-    thumb = thumb.astype(np.float32)
+    small = np.ascontiguousarray(frame[h // 48::h // 24, w // 64::w // 32])
+    thumb = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY).astype(np.float32)
 
     fresh = (
         _STATE.get("shape") != (h, w)
@@ -370,12 +369,14 @@ def _learned_width(state, n_rows):
     history = [row for row in state["widths"] if len(row) == n_rows]
     if len(history) < 3:
         return learned
-    stack = np.vstack(history)
-    for i in range(n_rows):
-        column = stack[:, i]
-        column = column[np.isfinite(column)]
-        if column.size >= 3:
-            learned[i] = float(np.median(column))
+    # Median of the finite values of every column (NaNs sort to the end).
+    stack = np.sort(np.vstack(history), axis=0)
+    count = np.count_nonzero(np.isfinite(stack), axis=0)
+    enough = count >= 3
+    if np.any(enough):
+        cols = np.flatnonzero(enough)
+        c = count[enough]
+        learned[enough] = 0.5 * (stack[(c - 1) // 2, cols] + stack[c // 2, cols])
     return learned
 
 
@@ -384,41 +385,46 @@ def _learned_width(state, n_rows):
 # ---------------------------------------------------------------------------
 
 def _masks(frame):
-    h = frame.shape[0]
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    h, w = frame.shape[:2]
+    top = int(0.45*h)
 
-    yellow = cv2.inRange(
+    # Nothing above the horizon is used, so only the lower part is converted.
+    hsv = cv2.cvtColor(frame[top:], cv2.COLOR_BGR2HSV)
+
+    yellow_low = cv2.inRange(
         hsv,
         np.array([18, 80, 60], dtype=np.uint8),
         np.array([45, 255, 255], dtype=np.uint8)
     )
-    yellow[:int(0.45*h), :] = 0
-    yellow[int(0.985*h):, :] = 0
+    yellow_low[int(0.985*h) - top:, :] = 0
 
     # White threshold proportional to the road brightness (illumination
     # scales paint and asphalt alike), so the mask neither vanishes in shade
     # nor floods on a bright road. 170 on a road whose median V is 100.
-    road_v = hsv[int(0.60*h):int(0.90*h), :, 2]
+    road_v = hsv[int(0.60*h) - top:int(0.90*h) - top:2, ::2, 2]
     road_median = float(np.median(road_v)) if road_v.size else 100.0
     v_min = int(np.clip(1.7 * road_median, 80.0, 225.0))
 
-    white = cv2.inRange(
+    white_low = cv2.inRange(
         hsv,
         np.array([0, 0, v_min], dtype=np.uint8),
         np.array([180, 110, 255], dtype=np.uint8)
     )
     # Pale yellow paint must not be taken for the divider.
-    white[cv2.dilate(yellow, np.ones((3, 3), np.uint8)) > 0] = 0
+    white_low[cv2.dilate(yellow_low, np.ones((3, 3), np.uint8)) > 0] = 0
+    white_low[int(0.92*h) - top:, :] = 0
 
-    white[:int(0.45*h), :] = 0
-    white[int(0.92*h):, :] = 0
+    white_low = cv2.morphologyEx(
+        white_low, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8)
+    )
+    white_low = cv2.morphologyEx(
+        white_low, cv2.MORPH_CLOSE, np.ones((3, 5), np.uint8)
+    )
 
-    white = cv2.morphologyEx(
-        white, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8)
-    )
-    white = cv2.morphologyEx(
-        white, cv2.MORPH_CLOSE, np.ones((3, 5), np.uint8)
-    )
+    yellow = np.zeros((h, w), dtype=np.uint8)
+    white = np.zeros((h, w), dtype=np.uint8)
+    yellow[top:] = yellow_low
+    white[top:] = white_low
     return yellow, white
 
 
@@ -437,49 +443,46 @@ def _fit_guided_yellow(mask, white_model, lane, h, w):
         return None
     white_values = np.asarray(white_values, dtype=np.float64)
 
-    points = []
-    for i, y in enumerate(rows.astype(np.int32)):
-        wx = white_values[i]
-        if not np.isfinite(wx):
-            continue
+    # All rows at once: yellow pixels on this lane's side of the divider,
+    # grouped into runs (gaps of up to 4 px bridged), keeping runs of at
+    # least 3 pixels. The run nearest the divider is the inner edge.
+    sub = mask[rows.astype(np.int32)] > 0
+    cols = np.arange(mask.shape[1], dtype=np.float64)[None, :]
+    if lane == LANE_LEFT:
+        sub &= cols < (white_values[:, None] - 8.0)
+    else:
+        sub &= cols > (white_values[:, None] + 8.0)
 
-        xs = np.flatnonzero(mask[y])
-        if xs.size == 0:
-            continue
-
-        if lane == LANE_LEFT:
-            xs = xs[xs < wx - 8.0]
-        else:
-            xs = xs[xs > wx + 8.0]
-        if xs.size == 0:
-            continue
-
-        breaks = np.flatnonzero(np.diff(xs) > 4)
-        if breaks.size:
-            starts = np.r_[0, breaks + 1]
-            ends = np.r_[breaks, xs.size - 1]
-        else:
-            starts = np.array([0])
-            ends = np.array([xs.size - 1])
-
-        valid = (ends - starts + 1) >= 3
-        if not np.any(valid):
-            continue
-        starts = starts[valid]
-        ends = ends[valid]
-
-        # The run nearest the divider is the inner edge of this lane.
-        if lane == LANE_LEFT:
-            x_value = float(np.max(xs[ends]))
-        else:
-            x_value = float(np.min(xs[starts]))
-
-        points.append((float(y), x_value))
-
-    if len(points) < 20:
+    r, x = np.nonzero(sub)
+    if r.size == 0:
         return None
 
-    arr = np.asarray(points, dtype=np.float64)
+    new_run = np.r_[True, (r[1:] != r[:-1]) | (np.diff(x) > 4)]
+    run_id = np.cumsum(new_run) - 1
+    counts = np.bincount(run_id)
+    first = np.flatnonzero(new_run)
+    last = np.r_[first[1:] - 1, r.size - 1]
+
+    keep = counts >= 3
+    run_row = r[first][keep]
+    if run_row.size == 0:
+        return None
+
+    if lane == LANE_LEFT:
+        # x increases within a row, so the last kept run has the largest end.
+        run_x = x[last][keep]
+        pick = np.r_[run_row[1:] != run_row[:-1], True]
+    else:
+        run_x = x[first][keep]
+        pick = np.r_[True, run_row[1:] != run_row[:-1]]
+
+    if np.count_nonzero(pick) < 20:
+        return None
+
+    arr = np.column_stack((
+        rows[run_row[pick]],
+        run_x[pick].astype(np.float64)
+    ))
     linear = _polyfit_stable(arr[:, 0], arr[:, 1], 1)
     if linear is None:
         return None
@@ -522,12 +525,13 @@ def _fit_yellow_boundaries(mask, h, w):
                         constant_values=False)
         changes = np.diff(padded.astype(np.int8), axis=1)
 
-        # np.nonzero is row-major, so the k-th start and k-th end belong to
-        # the same run.
-        rows, start_cols = np.nonzero(changes == 1)
-        _, end_cols = np.nonzero(changes == -1)
-        if rows.size == 0:
+        # Transitions alternate start, end along every row, and np.nonzero
+        # is row-major, so even entries are run starts and odd ones run ends.
+        t_rows, t_cols = np.nonzero(changes)
+        if t_rows.size == 0:
             continue
+        rows, start_cols = t_rows[0::2], t_cols[0::2]
+        end_cols = t_cols[1::2]
 
         lengths = end_cols - start_cols
         keep = lengths >= 4
@@ -603,14 +607,17 @@ def _model_from_points(ys, xs):
 
 
 def _fit_white_divider(mask, h, w):
+    # The mask is empty above 0.45*h, so label only the part below it.
+    top = int(0.45*h)
     n, labels, stats, centroids = cv2.connectedComponentsWithStats(
-        mask, connectivity=8
+        np.ascontiguousarray(mask[top:]), connectivity=8
     )
     components = []
 
     for i in range(1, n):
         x, y, ww, hh, area = stats[i]
         cx, cy = centroids[i]
+        cy += top
 
         if area < 35 or area > 3000:
             continue
@@ -629,37 +636,39 @@ def _fit_white_divider(mask, h, w):
         data = np.asarray([(c[1], c[0]) for c in components],
                           dtype=np.float64)
 
-        best_score = -1e9
         best_model = None
         best_inliers = None
 
-        for i in range(len(data)):
-            for j in range(i + 1, len(data)):
-                y1, x1 = data[i]
-                y2, x2 = data[j]
-                if abs(y2 - y1) < 30:
-                    continue
+        # Every pair of blobs at once: the line through the pair, its inliers
+        # and its score (count, vertical span, fit error).
+        ii, jj = np.triu_indices(len(data), k=1)
+        y1, x1 = data[ii, 0], data[ii, 1]
+        y2, x2 = data[jj, 0], data[jj, 1]
+        usable = np.abs(y2 - y1) >= 30
+        ii, jj = ii[usable], jj[usable]
+        y1, x1, y2, x2 = y1[usable], x1[usable], y2[usable], x2[usable]
 
-                model = _polyfit_stable([y1, y2], [x1, x2], 1)
-                if model is None:
-                    continue
+        if ii.size:
+            slope = (x2 - x1) / (y2 - y1)
+            pred = x1[:, None] + slope[:, None] * (data[None, :, 0] - y1[:, None])
+            residual = np.abs(pred - data[None, :, 1])
+            inl = residual <= 18.0
+            count = np.count_nonzero(inl, axis=1)
 
-                residual = np.abs(_eval_model(model, data[:, 0]) - data[:, 1])
-                inliers = residual <= 18.0
-                count = int(np.count_nonzero(inliers))
-                if count < 2:
-                    continue
+            ys = np.broadcast_to(data[None, :, 0], inl.shape)
+            span = (np.where(inl, ys, -np.inf).max(axis=1)
+                    - np.where(inl, ys, np.inf).min(axis=1))
+            mean_error = (np.where(inl, residual, 0.0).sum(axis=1)
+                          / np.maximum(count, 1))
+            score = 14.0*count + 0.08*span - 1.5*mean_error
+            score = np.where(span < 70, score - 15.0, score)
+            score = np.where(count >= 2, score, -np.inf)
 
-                span = float(np.ptp(data[inliers, 0]))
-                mean_error = float(np.mean(residual[inliers]))
-                score = 14.0*count + 0.08*span - 1.5*mean_error
-                if span < 70:
-                    score -= 15.0
-
-                if score > best_score:
-                    best_score = score
-                    best_model = model
-                    best_inliers = inliers
+            k = int(np.argmax(score))
+            if np.isfinite(score[k]):
+                best_model = _polyfit_stable(
+                    [y1[k], y2[k]], [x1[k], x2[k]], 1)
+                best_inliers = inl[k]
 
         if best_model is not None and best_inliers is not None:
             good = data[best_inliers]
