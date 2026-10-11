@@ -12,7 +12,7 @@
 *       _masks, _fit_white_divider, _fit_white_hough, _fit_guided_yellow,
 *       _fit_yellow_boundaries, _virtual_divider, _model_from_points,
 *       _polyfit_stable, _eval_model, _slope, _yellow_edges,
-*       _divider_plausible, _divider_from_edge
+*       _divider_plausible, _divider_from_edge, _finish_divider
 *
 *   Global variables added:
 *       LANE_ROWS_FRAC, CENTER_ROWS_FRAC, CENTER_ROW_WEIGHTS,
