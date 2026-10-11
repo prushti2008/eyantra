@@ -20,29 +20,24 @@ LANE_UNKNOWN = "unknown"
 VALID_LANES = (LANE_LEFT, LANE_RIGHT, LANE_UNKNOWN)
 
 # ============================== CONSTANTS ===================================
-# Vehicle (use the values from your Task 1A / the boilerplate)
-WHEELBASE_M = 0.30          # distance between front and rear axle
-TRACK_M = 0.20              # distance between the two front wheels
-MAX_STEER = math.radians(40.0)   # keep a margin below the 45 deg joint limit
+# Vehicle (from Task 1A)
+WHEELBASE_M = 0.120         # distance between front and rear axle
+TRACK_M = 0.110             # distance between the two front wheels
+MAX_STEER = math.radians(35.0)   # keep a margin below the 45 deg joint limit
 
-# Camera (read them off the scene's vision sensor; see the guide)
+# Camera - run calib_2a.py with the scene open to read these off the scene
 CAM_FOV_DEG = 60.0          # horizontal field of view of the vision sensor
 HORIZON_FRAC = 0.40         # image row (fraction of height) where the road
-                            # lines converge - check on a saved frame
+                            # lines converge
 AXIS_FRAC = 0.50            # image column (fraction of width) of the
                             # vehicle's own axis
 
-# Road
-LANE_WIDTH_M = 0.35         # real width of the lane you are driving in; the
-                            # pixel error is converted to metres with it
-
-# Controller
-K_STANLEY = 1.5             # cross-track gain
-K_SOFT = 0.15               # softening speed term (m/s), avoids divide by 0
-CRUISE_SPEED = 6.0          # wheel speed on straights, rad/s
-MIN_SPEED = 3.0             # wheel speed in the tightest bend, rad/s
+# Controller (the cross-track error is measured in LANE WIDTHS, so the real
+# lane width in metres is not needed)
+K_CT = 2.4                  # cross-track gain, per lane width
+CRUISE_SPEED = 2.0          # wheel speed on straights, rad/s
+MIN_SPEED = 1.0             # wheel speed in the tightest bend, rad/s
 STEER_SLOW = math.radians(20.0)  # steering at which speed reaches MIN_SPEED
-WHEEL_RADIUS_M = 0.04       # to turn rad/s into m/s for the Stanley term
 STEER_RATE = math.radians(120.0)  # max change of steering per second
 HOLD_FRAMES = 15            # frames to keep steering on the last good
                             # command when detection fails
@@ -850,10 +845,10 @@ _CTRL = {"prev_steer": 0.0, "prev_t": None, "last": None, "lost": 0}
 
 
 def detect_lane(frame):
-    """Return {"e": m, "psi": rad, "lane": str} or None.
+    """Return {"e": lane widths, "psi": rad, "lane": str} or None.
 
-    e   cross-track error: positive when the lane centre is to the RIGHT of
-        the vehicle's axis.
+    e   cross-track error in lane widths: positive when the lane centre is to
+        the RIGHT of the vehicle's axis.
     psi heading error: positive when the lane runs to the RIGHT of where the
         vehicle points.
     """
@@ -887,15 +882,15 @@ def detect_lane(frame):
     xx = centres[good][order]
     ww = widths[good][order]
 
-    # Cross-track error at the nearest row, scaled to metres by the measured
-    # lane width at that row.
+    # Cross-track error at the nearest row, as a fraction of the measured lane
+    # width at that row.
     y_near = float(yy[0])
     x_fit = np.polyfit(yy, xx, 1) if len(yy) >= 2 and np.ptp(yy) > 1 else None
     x_near = float(np.polyval(x_fit, y_near)) if x_fit is not None else float(xx[0])
     width_near = float(np.median(ww))
     if width_near < 10.0:
         return None
-    e = (x_near - cx) / width_near * LANE_WIDTH_M
+    e = (x_near - cx) / width_near
 
     # Heading error: where the local tangent of the centre line meets the
     # horizon, compared with the camera axis. On a line the slope dx/dy only
@@ -968,11 +963,9 @@ def compute_control(detection, stop_requested, now=None, dt=None):
         steer_target = 0.0
         speed = 0.0 if stop_requested else MIN_SPEED * 0.5
     else:
-        speed_ms = max(CRUISE_SPEED, 1e-3) * WHEEL_RADIUS_M
-        # Stanley, written for a right-positive error; steering joints are
-        # positive to the LEFT, hence the minus sign.
-        delta_right = detection["psi"] + math.atan2(
-            K_STANLEY * detection["e"], K_SOFT + speed_ms)
+        # Stanley-style law, written for a right-positive error; the
+        # steering joints are positive to the LEFT, hence the minus sign.
+        delta_right = detection["psi"] + math.atan(K_CT * detection["e"])
         steer_target = -delta_right
         steer_target = max(-MAX_STEER, min(MAX_STEER, steer_target))
         frac = min(1.0, abs(steer_target) / STEER_SLOW)
