@@ -26,8 +26,9 @@ TRACK_M = 0.110             # distance between the two front wheels
 MAX_STEER = math.radians(35.0)   # keep a margin below the 45 deg joint limit
 
 # Camera - run calib_2a.py with the scene open to read these off the scene
-CAM_FOV_DEG = 60.0          # horizontal field of view of the vision sensor
-HORIZON_FRAC = 0.40         # image row (fraction of height) where the road
+CAM_FOV_DEG = 95.0          # horizontal field of view of the vision sensor
+CAM_PITCH_DEG = 30.0        # how far the camera looks down
+HORIZON_FRAC = 0.15         # image row (fraction of height) where the road
                             # lines converge
 AXIS_FRAC = 0.50            # image column (fraction of width) of the
                             # vehicle's own axis
@@ -898,7 +899,9 @@ def detect_lane(frame):
     # heading.
     slope = float(x_fit[0]) if x_fit is not None else 0.0
     x_vp = x_near - slope * (y_near - v0)
-    psi = math.atan((x_vp - cx) / f_px)
+    # A camera pitched down by CAM_PITCH_DEG sees a sideways shift of the
+    # vanishing point stretched by 1 / cos(pitch).
+    psi = math.atan((x_vp - cx) * math.cos(math.radians(CAM_PITCH_DEG)) / f_px)
     psi = max(-math.radians(45.0), min(math.radians(45.0), psi))
 
     return {"e": e, "psi": psi, "lane": result["lane"]}
