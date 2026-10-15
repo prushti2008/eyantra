@@ -23,8 +23,10 @@
 # Author List:      PRACHI KHUHA, PRUSHTI RANINGA, MRUNALI TRIVEDI, TAPI KARIYA
 # Filename:         task2c.py
 # Functions:        parking_manoeuvre
-# Global variables: SLOW_DOWN_AT, NEAR_BAY, FAR_BAY, FAR_BAY_LATERAL, LOST_LIMIT,
-#                   _last_steering, _lost_frames, _last_forward, _params
+# Global variables: CRUISE_SPEED, CREEP_SPEED, SLOW_DOWN_AT, MAX_HEADING_AIM,
+#                   LOOKAHEAD_SLOPE, LOOKAHEAD_MIN, LOOKAHEAD_MAX, BRAKE_CURVATURE,
+#                   HEADING_GAIN, MAX_STEER, MAX_STEER_STEP, LOST_LIMIT, STOP_EARLY,
+#                   _last_steering, _lost_frames, _last_forward
 
 
 ####################### IMPORT MODULES #######################
@@ -73,34 +75,28 @@ BAY_WIDTH          = 0.22    # m - the vehicle is 0.18 m across
 # Speeds are drive-motor velocities in rad/s. The path the vehicle takes does not
 # depend on them; they only set how fast it gets there. Slow and steady works best:
 # the pose estimate is only reliable if the vehicle is not changing direction too fast.
+CRUISE_SPEED = 1.34       # rad/s, on the open road
+CREEP_SPEED  = 1.40       # rad/s, for the last stretch into the bay
 SLOW_DOWN_AT = 0.15       # m, start slowing this far before the bay mouth
 
 # Steering: the vehicle aims at a heading (not at the marker) that brings it onto the
 # bay's centre line, then a second loop steers to that heading.
-#   aim       : the most it will ever aim across the road (rad)
-#   look_k    : lookahead along the line = look_k * (forward - middle) ...
-#   look_min / look_max : ... but never below / above these (m)
-#   brake     : 1/m, how hard it allows itself to straighten out near the line
-#   gain      : 1/(m*rad), steering from heading error
-#   max_steer : steering limit used by this function (rad)
-#   max_step  : the most the steering may change in one frame (rad)
-#   cruise / creep : drive speeds, open road / last stretch (rad/s)
-#   stop_early: call it parked this much before the middle of the bay (m)
-NEAR_BAY = dict(aim=0.72, look_k=0.20, look_min=0.05, look_max=0.56, brake=4.44,
-                gain=7.68, max_steer=0.764, max_step=0.20,
-                cruise=1.34, creep=1.40, stop_early=0.020)
-# bay 1 needs twice the sideways crossing: same steering as bay 0, but it crosses
-# more slowly so the pose estimate keeps up (higher gains made it wobble)
-FAR_BAY  = dict(NEAR_BAY, cruise=1.00)
-FAR_BAY_LATERAL = 0.34    # m, a first lateral offset beyond this means the far bay
+MAX_HEADING_AIM = 0.72    # rad (~41 deg), the most it will ever aim across the road
+LOOKAHEAD_SLOPE = 0.20    # lookahead along the line = slope * (forward - middle) ...
+LOOKAHEAD_MIN   = 0.05    # ... but never below this (m)
+LOOKAHEAD_MAX   = 0.56    # ... or above this (m)
+BRAKE_CURVATURE = 4.44    # 1/m, how hard it allows itself to straighten out near the line
+HEADING_GAIN    = 7.68    # 1/(m*rad), steering from heading error
+MAX_STEER       = 0.764   # rad (~44 deg), steering limit used by this function
+MAX_STEER_STEP  = 0.20    # rad, the most the steering may change in one frame
 
 LOST_LIMIT = 15           # frames without the marker before it holds still
+STOP_EARLY = 0.020        # m, call it parked this much before the middle (the vehicle rolls on a little)
 
 # memory between frames
 _last_steering = 0.0
 _lost_frames   = 0
 _last_forward  = None
-_params        = None
 
 
 def parking_manoeuvre(pose):
@@ -125,14 +121,7 @@ def parking_manoeuvre(pose):
     `speed` :       [ float ]   rad/s
     `parked` :      [ bool ]    True once parked
     '''
-    global _last_steering, _lost_frames, _last_forward, _params
-
-    # ---- which bay? the vehicle starts level, so the first offset says ----
-    if _params is None:
-        if pose is None:
-            return 0.0, 0.0, False
-        _params = FAR_BAY if pose['lateral'] > FAR_BAY_LATERAL else NEAR_BAY
-    p = _params
+    global _last_steering, _lost_frames, _last_forward
 
     # ---- no marker this frame ----
     if pose is None:
@@ -143,7 +132,7 @@ def parking_manoeuvre(pose):
             return 0.0, 0.0, True
         if _lost_frames > LOST_LIMIT:
             return 0.0, 0.0, False          # hold still until the marker is back
-        return _last_steering, p['creep'], False   # one lost frame: carry on slowly
+        return _last_steering, CREEP_SPEED, False   # one lost frame: carry on slowly
 
     _lost_frames = 0
     lateral = pose['lateral']
@@ -152,33 +141,33 @@ def parking_manoeuvre(pose):
     _last_forward = forward
 
     # ---- in the middle of the bay: stop ----
-    if forward <= BAY_MIDDLE_FORWARD + p['stop_early']:
+    if forward <= BAY_MIDDLE_FORWARD + STOP_EARLY:
         return 0.0, 0.0, True
 
     # ---- aim: a heading that takes the vehicle onto the centre line ----
-    lookahead = min(max(p['look_k'] * (forward - BAY_MIDDLE_FORWARD),
-                        p['look_min']), p['look_max'])
-    aim = -float(np.clip(np.arctan2(lateral, lookahead), -p['aim'], p['aim']))
+    lookahead = min(max(LOOKAHEAD_SLOPE * (forward - BAY_MIDDLE_FORWARD),
+                        LOOKAHEAD_MIN), LOOKAHEAD_MAX)
+    aim = -float(np.clip(np.arctan2(lateral, lookahead),
+                         -MAX_HEADING_AIM, MAX_HEADING_AIM))
     # do not aim steeper than it can still straighten out of before the line
-    limit = np.sqrt(2.0 * p['brake'] * abs(lateral))
+    limit = np.sqrt(2.0 * BRAKE_CURVATURE * abs(lateral))
     aim = float(np.clip(aim, -limit, limit))
 
     # ---- steer to that heading ----
-    curvature = p['gain'] * (aim - heading)
-    steering = float(np.clip(np.arctan(WHEELBASE * curvature),
-                             -p['max_steer'], p['max_steer']))
-    steering = float(np.clip(steering, _last_steering - p['max_step'],
-                             _last_steering + p['max_step']))
+    curvature = HEADING_GAIN * (aim - heading)
+    steering = float(np.clip(np.arctan(WHEELBASE * curvature), -MAX_STEER, MAX_STEER))
+    steering = float(np.clip(steering, _last_steering - MAX_STEER_STEP,
+                             _last_steering + MAX_STEER_STEP))
     _last_steering = steering
 
     # ---- speed: cruise, then creep for the last stretch ----
     if forward < BAY_MOUTH_FORWARD:
-        speed = p['creep']
+        speed = CREEP_SPEED
     elif forward > BAY_MOUTH_FORWARD + SLOW_DOWN_AT:
-        speed = p['cruise']
+        speed = CRUISE_SPEED
     else:
         t = (forward - BAY_MIDDLE_FORWARD) / (BAY_MOUTH_FORWARD + SLOW_DOWN_AT - BAY_MIDDLE_FORWARD)
-        speed = max(p['creep'], p['cruise'] * t)
+        speed = max(CREEP_SPEED, CRUISE_SPEED * t)
 
     return steering, float(speed), False
 
