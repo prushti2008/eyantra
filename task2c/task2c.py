@@ -89,10 +89,9 @@ SLOW_DOWN_AT = 0.15       # m, start slowing this far before the bay mouth
 NEAR_BAY = dict(aim=0.72, look_k=0.20, look_min=0.05, look_max=0.56, brake=4.44,
                 gain=7.68, max_steer=0.764, max_step=0.20,
                 cruise=1.34, creep=1.40, stop_early=0.020)
-# bay 1 needs twice the sideways crossing, so it gets its own settings
-FAR_BAY  = dict(aim=0.72, look_k=0.10, look_min=0.03, look_max=0.40, brake=3.60,
-                gain=10.9, max_steer=0.68, max_step=0.13,
-                cruise=0.90, creep=1.19, stop_early=-0.010)
+# bay 1 needs twice the sideways crossing: same steering as bay 0, but it crosses
+# more slowly so the pose estimate keeps up (higher gains made it wobble)
+FAR_BAY  = dict(NEAR_BAY, cruise=1.00)
 FAR_BAY_LATERAL = 0.34    # m, a first lateral offset beyond this means the far bay
 
 LOST_LIMIT = 15           # frames without the marker before it holds still
