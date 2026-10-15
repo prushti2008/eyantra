@@ -22,8 +22,8 @@
 # Team ID:          NV_3765
 # Author List:      PRACHI KHUHA, PRUSHTI RANINGA, MRUNALI TRIVEDI, TAPI KARIYA
 # Filename:         sign_obstacle_detection.py
-# Functions:        detect_signs, detect_obstacle, _red_mask, _obstacle_mask, _blobs,
-#                   _touches_border, _classify_blue
+# Functions:        detect_signs, detect_obstacle, _red_mask, _obstacle_mask, _grow_obstacle,
+#                   _blobs, _touches_border, _classify_blue
 # Global variables: MIN_BLUE_AREA, MIN_RING_AREA, MIN_OBSTACLE_AREA
 
 
@@ -159,7 +159,7 @@ def detect_obstacle(image):
 
     #################### ADD YOUR CODE HERE ####################
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-    mask = _obstacle_mask(hsv)
+    mask = _grow_obstacle(hsv, _obstacle_mask(hsv))
     best = 0
     n, _, st, _ = cv2.connectedComponentsWithStats(mask)
     for i in range(1, n):
@@ -203,6 +203,17 @@ def _obstacle_mask(hsv):
         if a < MIN_OBSTACLE_AREA or max(w, h) <= 20:
             continue
         out[lab == i] = 255
+    return out
+
+
+def _grow_obstacle(hsv, solid):
+    # win back the edge pixels the opening removed (stays within the red mask, so
+    # thin rings further away are not pulled in), then fill any holes
+    grown = cv2.bitwise_and(cv2.dilate(solid, np.ones((9, 9), np.uint8)), _red_mask(hsv))
+    grown = cv2.morphologyEx(grown, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+    cnts, _ = cv2.findContours(grown, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    out = np.zeros_like(grown)
+    cv2.drawContours(out, cnts, -1, 255, -1)
     return out
 
 
