@@ -23,10 +23,10 @@
 # Author List:      PRACHI KHUHA, PRUSHTI RANINGA, MRUNALI TRIVEDI, TAPI KARIYA
 # Filename:         task2c.py
 # Functions:        parking_manoeuvre
-# Global variables: CRUISE_SPEED, CREEP_SPEED, MAX_HEADING_AIM, LOOKAHEAD_SLOPE,
-#                   LOOKAHEAD_MIN, LOOKAHEAD_MAX, BRAKE_CURVATURE, HEADING_GAIN,
-#                   MAX_STEER, SLOW_DOWN_AT, LOST_LIMIT, _last_steering, _lost_frames,
-#                   _last_forward
+# Global variables: CRUISE_SPEED, CREEP_SPEED, SLOW_DOWN_AT, MAX_HEADING_AIM,
+#                   LOOKAHEAD_SLOPE, LOOKAHEAD_MIN, LOOKAHEAD_MAX, BRAKE_CURVATURE,
+#                   HEADING_GAIN, MAX_STEER, MAX_STEER_STEP, LOST_LIMIT,
+#                   _last_steering, _lost_frames, _last_forward
 
 
 ####################### IMPORT MODULES #######################
@@ -73,20 +73,22 @@ BAY_WIDTH          = 0.22    # m - the vehicle is 0.18 m across
 
 # ---- tuning knobs ----
 # Speeds are drive-motor velocities in rad/s. The path the vehicle takes does not
-# depend on them; they only set how fast it gets there.
-CRUISE_SPEED = 3.0        # rad/s, on the open road
-CREEP_SPEED  = 1.1        # rad/s, for the last stretch into the bay
+# depend on them; they only set how fast it gets there. Slow and steady works best:
+# the pose estimate is only reliable if the vehicle is not changing direction too fast.
+CRUISE_SPEED = 1.34       # rad/s, on the open road
+CREEP_SPEED  = 1.40       # rad/s, for the last stretch into the bay
 SLOW_DOWN_AT = 0.15       # m, start slowing this far before the bay mouth
 
 # Steering: the vehicle aims at a heading (not at the marker) that brings it onto the
 # bay's centre line, then a second loop steers to that heading.
 MAX_HEADING_AIM = 0.72    # rad (~41 deg), the most it will ever aim across the road
-LOOKAHEAD_SLOPE = 0.10    # lookahead along the line = slope * (forward - middle) ...
-LOOKAHEAD_MIN   = 0.03    # ... but never below this (m)
-LOOKAHEAD_MAX   = 0.87    # ... or above this (m)
-BRAKE_CURVATURE = 11.1    # 1/m, how hard it allows itself to straighten out near the line
-HEADING_GAIN    = 22.9    # 1/(m*rad), steering from heading error
-MAX_STEER       = 0.785   # rad (45 deg), steering limit used by this function
+LOOKAHEAD_SLOPE = 0.20    # lookahead along the line = slope * (forward - middle) ...
+LOOKAHEAD_MIN   = 0.05    # ... but never below this (m)
+LOOKAHEAD_MAX   = 0.56    # ... or above this (m)
+BRAKE_CURVATURE = 4.44    # 1/m, how hard it allows itself to straighten out near the line
+HEADING_GAIN    = 7.68    # 1/(m*rad), steering from heading error
+MAX_STEER       = 0.764   # rad (~44 deg), steering limit used by this function
+MAX_STEER_STEP  = 0.20    # rad, the most the steering may change in one frame
 
 LOST_LIMIT = 15           # frames without the marker before it holds still
 
@@ -153,6 +155,8 @@ def parking_manoeuvre(pose):
     # ---- steer to that heading ----
     curvature = HEADING_GAIN * (aim - heading)
     steering = float(np.clip(np.arctan(WHEELBASE * curvature), -MAX_STEER, MAX_STEER))
+    steering = float(np.clip(steering, _last_steering - MAX_STEER_STEP,
+                             _last_steering + MAX_STEER_STEP))
     _last_steering = steering
 
     # ---- speed: cruise, then creep for the last stretch ----
