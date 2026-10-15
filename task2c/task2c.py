@@ -25,7 +25,7 @@
 # Functions:        parking_manoeuvre
 # Global variables: CRUISE_SPEED, CREEP_SPEED, SLOW_DOWN_AT, MAX_HEADING_AIM,
 #                   LOOKAHEAD_SLOPE, LOOKAHEAD_MIN, LOOKAHEAD_MAX, BRAKE_CURVATURE,
-#                   HEADING_GAIN, MAX_STEER, MAX_STEER_STEP, LOST_LIMIT,
+#                   HEADING_GAIN, MAX_STEER, MAX_STEER_STEP, LOST_LIMIT, STOP_EARLY,
 #                   _last_steering, _lost_frames, _last_forward
 
 
@@ -91,6 +91,7 @@ MAX_STEER       = 0.764   # rad (~44 deg), steering limit used by this function
 MAX_STEER_STEP  = 0.20    # rad, the most the steering may change in one frame
 
 LOST_LIMIT = 15           # frames without the marker before it holds still
+STOP_EARLY = 0.020        # m, call it parked this much before the middle (the vehicle rolls on a little)
 
 # memory between frames
 _last_steering = 0.0
@@ -140,7 +141,7 @@ def parking_manoeuvre(pose):
     _last_forward = forward
 
     # ---- in the middle of the bay: stop ----
-    if forward <= BAY_MIDDLE_FORWARD:
+    if forward <= BAY_MIDDLE_FORWARD + STOP_EARLY:
         return 0.0, 0.0, True
 
     # ---- aim: a heading that takes the vehicle onto the centre line ----
