@@ -20,7 +20,7 @@
 '''
 
 # Team ID:          NV_3765
-# Author List:      < Names of the team members who worked on this file, comma separated >
+# Author List:      PRACHI KHUHA, PRUSHTI RANINGA, MRUNALI TRIVEDI, TAPI KARIYA
 # Filename:         sign_obstacle_detection.py
 # Functions:        detect_signs, detect_obstacle, _red_mask, _obstacle_mask, _blobs,
 #                   _touches_border, _classify_blue
